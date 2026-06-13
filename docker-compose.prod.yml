@@ -1,0 +1,145 @@
+# Production stack: MySQL + Redis + API + static web + nginx gateway
+# Prerequisites: copy deploy/env/compose.env.example → .env (project root) and fill secrets
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+#
+# Point DNS:
+#   yourdomain.com     → VPS
+#   api.yourdomain.com → VPS
+#
+# For HTTPS, put Caddy or Certbot in front of gateway (port 80) or extend gateway with TLS.
+
+name: vendor-qr-prod
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: vendor_qr_invoice
+      MYSQL_USER: vendorqr
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./Server/config/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    networks:
+      - vendor_qr
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - vendor_qr
+
+  api:
+    image: ${API_IMAGE:-vendor-qr-prod-api:local}
+    build:
+      context: ./Server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./deploy/env/api.env
+    environment:
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: vendorqr
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: vendor_qr_invoice
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      CLIENT_URL: ${CLIENT_URL}
+      API_BASE_URL: ${API_BASE_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      QR_SECRET_KEY: ${QR_SECRET_KEY}
+      QR_VERIFY_API_KEY: ${QR_VERIFY_API_KEY}
+      COOKIE_SAME_SITE: ${COOKIE_SAME_SITE:-none}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:5000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    networks:
+      - vendor_qr
+
+  web:
+    image: ${WEB_IMAGE:-vendor-qr-prod-web:local}
+    build:
+      context: ./Client
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+        VITE_COMPANY_NAME: ${VITE_COMPANY_NAME:-}
+        VITE_COMPANY_LEGAL_NAME: ${VITE_COMPANY_LEGAL_NAME:-}
+        VITE_COMPANY_WORKS_ADDRESSES: ${VITE_COMPANY_WORKS_ADDRESSES:-}
+        VITE_COMPANY_REG_OFFICE: ${VITE_COMPANY_REG_OFFICE:-}
+        VITE_COMPANY_BILLING_LABEL: ${VITE_COMPANY_BILLING_LABEL:-}
+        VITE_COMPANY_ADDRESS: ${VITE_COMPANY_ADDRESS:-}
+        VITE_COMPANY_GST: ${VITE_COMPANY_GST:-}
+        VITE_COMPANY_PAN: ${VITE_COMPANY_PAN:-}
+        VITE_COMPANY_PHONE: ${VITE_COMPANY_PHONE:-}
+        VITE_COMPANY_FAX: ${VITE_COMPANY_FAX:-}
+        VITE_COMPANY_EMAIL: ${VITE_COMPANY_EMAIL:-}
+        VITE_COMPANY_LOGO_URL: ${VITE_COMPANY_LOGO_URL:-/paranjape-logo.png}
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks:
+      - vendor_qr
+
+  gateway:
+    image: nginx:alpine
+    restart: unless-stopped
+    depends_on:
+      - web
+      - api
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    environment:
+      FRONTEND_DOMAIN: ${FRONTEND_DOMAIN}
+      API_DOMAIN: ${API_DOMAIN}
+    volumes:
+      - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks:
+      - vendor_qr
+
+volumes:
+  mysql_data:
+  redis_data:
+
+networks:
+  vendor_qr:
+    driver: bridge

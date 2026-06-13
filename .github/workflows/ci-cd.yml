@@ -1,0 +1,107 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: Server/package-lock.json
+
+      - name: Install Server dependencies
+        run: npm ci
+        working-directory: Server
+
+      - name: Server syntax check
+        run: node --check server.js && node --check app.js
+        working-directory: Server
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: Client/package-lock.json
+
+      - name: Install Client dependencies
+        run: npm ci
+        working-directory: Client
+
+      - name: Build Client (smoke)
+        run: npm run build
+        working-directory: Client
+        env:
+          VITE_API_URL: https://api.example.com
+
+  build-images:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Server
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/api:latest
+            ${{ env.IMAGE_PREFIX }}/api:${{ github.sha }}
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./Client
+          push: true
+          build-args: |
+            VITE_API_URL=${{ vars.VITE_API_URL || 'https://api.example.com' }}
+            VITE_COMPANY_NAME=${{ vars.VITE_COMPANY_NAME || '' }}
+            VITE_COMPANY_LOGO_URL=/paranjape-logo.png
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/web:latest
+            ${{ env.IMAGE_PREFIX }}/web:${{ github.sha }}
+
+  deploy:
+    if: github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true'
+    needs: build-images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd ${{ secrets.VPS_APP_PATH || '/opt/vendor-qr' }}
+            git pull origin main
+            docker compose -f docker-compose.prod.yml --env-file .env pull
+            docker compose -f docker-compose.prod.yml --env-file .env up -d --remove-orphans
+            docker image prune -f

@@ -1,0 +1,19 @@
+# Local development — Redis only. Full stack: docker compose -f docker-compose.prod.yml up -d
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: vendor-qr-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - vendor_qr_redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  vendor_qr_redis_data:
