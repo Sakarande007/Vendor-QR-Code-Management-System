@@ -50,12 +50,6 @@ export function InvoicePrintDocument({ data }) {
             <strong>PO No :</strong> {invoice.poNumber}
           </span>
         </div>
-        {qrBase64 && (
-          <div className="invoice-print-doc-title-qr">
-            <img src={qrBase64} alt="Invoice QR" width={72} height={72} />
-            <span>Invoice QR</span>
-          </div>
-        )}
       </div>
 
       {/* From (vendor) + Bill To (company) */}
@@ -120,7 +114,6 @@ export function InvoicePrintDocument({ data }) {
               <th className="col-uom">Unit</th>
               <th className="col-rate num">Rate (INR)</th>
               <th className="col-amt num">Value (INR)</th>
-              <th className="col-qr">QR</th>
             </tr>
           </thead>
           <tbody>
@@ -135,18 +128,6 @@ export function InvoicePrintDocument({ data }) {
                 <td>{row.uom}</td>
                 <td className="num">{formatCurrency(row.unitPrice ?? 0)}</td>
                 <td className="num">{formatCurrency(row.lineTotal)}</td>
-                <td className="invoice-print-line-qr">
-                  {row.qrBase64 ? (
-                    <img
-                      src={row.qrBase64}
-                      alt={`QR ${row.materialCode}`}
-                      width={56}
-                      height={56}
-                    />
-                  ) : (
-                    "—"
-                  )}
-                </td>
               </tr>
             ))}
           </tbody>
@@ -154,7 +135,6 @@ export function InvoicePrintDocument({ data }) {
             <tr>
               <td colSpan={8} className="num invoice-print-total-label">Total</td>
               <td className="num invoice-print-total-value">{formatCurrency(subtotal)}</td>
-              <td />
             </tr>
           </tfoot>
         </table>
@@ -171,7 +151,7 @@ export function InvoicePrintDocument({ data }) {
             Compliance to GST and e-way bill requirements is the supplier&apos;s responsibility.
           </li>
           <li>
-            This is a system-generated tax invoice. QR codes on each line are for material
+            This is a system-generated tax invoice. Scan the QR code below for material
             verification at receipt.
           </li>
         </ol>
@@ -203,6 +183,13 @@ export function InvoicePrintDocument({ data }) {
           <div className="invoice-print-signature-box">Checked By</div>
           <div className="invoice-print-signature-box">Authorized Signature</div>
         </div>
+
+        {qrBase64 && (
+          <section className="invoice-print-footer-qr" aria-label="Invoice QR code">
+            <img src={qrBase64} alt="Invoice verification QR code" />
+            <p>Invoice verification QR</p>
+          </section>
+        )}
 
         <p className="invoice-print-generated-note">
           Computer-generated invoice — {company.name} · Print date {formatDateSap(new Date())}

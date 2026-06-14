@@ -1,6 +1,8 @@
 import { query } from "../config/db.js";
 import { logger } from "./logger.js";
 
+export const DEFAULT_PO_DEPARTMENT = "MOULD";
+
 /**
  * @param {string} table
  * @param {string} column
@@ -24,6 +26,20 @@ export async function ensureMasterSchema() {
     await query(
       `ALTER TABLE materials
        ADD COLUMN unit_price DECIMAL(15, 2) NOT NULL DEFAULT 0.00 AFTER uom`
+    );
+  }
+
+  if (!(await hasColumn("po_headers", "department"))) {
+    logger.info("[schema] Adding po_headers.department column");
+    await query(
+      `ALTER TABLE po_headers
+       ADD COLUMN department VARCHAR(50) NOT NULL DEFAULT 'MOULD'
+         COMMENT 'GRN / QR department e.g. MOULD'
+         AFTER plant_code`
+    );
+    await query(
+      `UPDATE po_headers SET department = 'MOULD'
+       WHERE department IS NULL OR TRIM(department) = ''`
     );
   }
 }

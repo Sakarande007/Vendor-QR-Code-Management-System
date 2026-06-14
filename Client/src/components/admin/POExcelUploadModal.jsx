@@ -22,8 +22,9 @@ function formatFileSize(bytes) {
  * @param {boolean} props.open
  * @param {() => void} props.onClose
  * @param {(file: File, onProgress: (n: number) => void) => Promise<object>} props.onUpload
+ * @param {"admin"|"vendor"} [props.variant]
  */
-export function POExcelUploadModal({ open, onClose, onUpload }) {
+export function POExcelUploadModal({ open, onClose, onUpload, variant = "admin" }) {
   const [file, setFile] = useState(null);
   const [progress, setProgress] = useState(0);
   const [uploading, setUploading] = useState(false);
@@ -108,8 +109,9 @@ export function POExcelUploadModal({ open, onClose, onUpload }) {
             </p>
             <p className="text-xs text-slate-500 mt-1">Max 10MB</p>
             <p className="text-xs text-slate-500 mt-2">
-              PO rows are linked to vendors onboarded in Admin → Vendors (SAP vendor code must
-              match).
+              {variant === "vendor"
+                ? "Vendor Code in Excel must match your logged-in vendor code. Rows for other vendors are rejected."
+                : "PO rows are linked to vendors onboarded in Admin → Vendors (SAP vendor code must match)."}
             </p>
           </>
         )}
@@ -132,7 +134,7 @@ export function POExcelUploadModal({ open, onClose, onUpload }) {
           <p>✅ {uploadResult.inserted ?? 0} rows inserted</p>
           <p>🔄 {uploadResult.updated ?? 0} rows updated</p>
           <p>❌ {uploadResult.errors ?? 0} errors</p>
-          {uploadResult.vendors_not_onboarded?.length > 0 && (
+          {variant === "admin" && uploadResult.vendors_not_onboarded?.length > 0 && (
             <p className="text-amber-800">
               Not onboarded (add in Admin → Vendors first):{" "}
               <span className="font-mono">{uploadResult.vendors_not_onboarded.join(", ")}</span>

@@ -7,6 +7,7 @@ import { encrypt, decrypt, hashData } from "../utils/encryption.js";
 import { sha256Hex, timingSafeCompareStrings } from "../utils/timingSafe.js";
 import { writeAuditLog } from "../utils/auditHelper.js";
 import { ApiError } from "../utils/ApiError.js";
+import { DEFAULT_PO_DEPARTMENT } from "../utils/ensureMasterSchema.js";
 
 const QR_VERSION = "1";
 const MAX_PAYLOAD_AGE_SEC = 365 * 24 * 60 * 60;
@@ -76,9 +77,11 @@ async function fetchInvoiceForQR(invoiceId, conn = null) {
   const headers = await executeQuery(
     conn,
     `SELECT i.invoice_id, i.system_invoice_id, i.invoice_number, i.vendor_code,
-            i.po_number, i.invoice_date, i.status, ph.plant_code
+            i.po_number, i.invoice_date, i.status, ph.plant_code, ph.department,
+            v.vendor_code_sap
      FROM invoices i
      INNER JOIN po_headers ph ON ph.po_number = i.po_number
+     INNER JOIN vendors v ON v.vendor_code = i.vendor_code
      WHERE i.invoice_id = ?`,
     [invoiceId]
   );
@@ -89,7 +92,8 @@ async function fetchInvoiceForQR(invoiceId, conn = null) {
 
   const lines = await executeQuery(
     conn,
-    `SELECT il.po_line_no, il.material_code, il.plant_code, il.invoice_qty, il.uom
+    `SELECT il.po_line_no, il.material_code, il.plant_code, il.invoice_qty, il.uom,
+            il.storage_location_code
      FROM invoice_lines il
      WHERE il.invoice_id = ?
      ORDER BY il.po_line_no`,
@@ -101,28 +105,21 @@ async function fetchInvoiceForQR(invoiceId, conn = null) {
 
 /**
  * Human-readable QR content for invoice print (scannable without decryption).
+ * @deprecated Prefer buildInvoiceHashQrString — kept for legacy JSON verify path.
  * @param {object} invoice
  * @param {object[]} lines
  * @returns {string}
  */
 function buildReadableQRContent(invoice, lines) {
-  return JSON.stringify({
-    vendorCode: invoice.vendor_code,
-    poNumber: invoice.po_number,
-    invoiceNumber: invoice.invoice_number,
-    systemInvoiceId: invoice.system_invoice_id,
-    lines: lines.map((l) => ({
-      materialCode: l.material_code,
-      quantity: Number(l.invoice_qty),
-      uom: l.uom ?? undefined,
-    })),
-  });
+  return buildInvoiceHashQrString(invoice, lines);
 }
 
-// Per-material QR content (FRD: vendor code, PO no, invoice no, invoice date,
-// department, PO line no). Department has no source field yet, so it is left
-// blank between the delimiters. Order matches the agreed barcode spec sheet.
-const QR_LINE_FIELD_DELIMITER = "|";
+// Corporate barcode spec: # delimiter, header + 6 fields per line.
+// Header: vendorSap#poNumber#invoiceNumber#invoiceDate#department
+// Line:   poLineNo#materialCode#quantity#uom#plantCode#storageLocationCode
+const QR_FIELD_DELIMITER = "#";
+const QR_HEADER_FIELD_COUNT = 5;
+const QR_LINE_FIELD_COUNT = 6;
 
 /**
  * Formats a DB invoice_date into DDMMYYYY (matches the barcode spec sheet).
@@ -141,23 +138,137 @@ function formatInvoiceDateDDMMYYYY(value) {
 }
 
 /**
- * Builds the scannable per-material QR string with the 6 spec fields:
- * vendorCode | poNumber | invoiceNumber | invoiceDate | department | poLineNo.
- * Department is intentionally empty (no source field).
- * @param {object} invoice
- * @param {object} line
+ * @param {number|string} qty
  * @returns {string}
  */
-function buildLineQrString(invoice, line) {
-  const department = "";
-  return [
-    invoice.vendor_code ?? "",
+function formatQrQuantity(qty) {
+  const n = Number(qty);
+  if (!Number.isFinite(n)) {
+    return String(qty ?? "");
+  }
+  if (Number.isInteger(n)) {
+    return String(n);
+  }
+  return String(n);
+}
+
+/**
+ * Department in QR (from PO header, default MOULD).
+ * @param {object} invoice
+ * @returns {string}
+ */
+function formatQrDepartment(invoice) {
+  const dept = String(invoice.department ?? "").trim();
+  return dept ? dept.toUpperCase() : DEFAULT_PO_DEPARTMENT;
+}
+
+/**
+ * Builds the hash-delimited invoice QR string (one QR encodes all lines).
+ * Example: 50534#530001003#25060248#25062025#MOLDING#420#6002535#246#EA#1112#4102...
+ * @param {object} invoice
+ * @param {object[]} lines
+ * @returns {string}
+ */
+export function buildInvoiceHashQrString(invoice, lines) {
+  const vendorSap = String(invoice.vendor_code_sap ?? invoice.vendor_code ?? "").trim();
+  const header = [
+    vendorSap,
     invoice.po_number ?? "",
     invoice.invoice_number ?? "",
     formatInvoiceDateDDMMYYYY(invoice.invoice_date),
+    formatQrDepartment(invoice),
+  ];
+
+  const lineParts = [];
+  for (const line of lines) {
+    lineParts.push(
+      String(line.po_line_no ?? ""),
+      line.material_code ?? "",
+      formatQrQuantity(line.invoice_qty),
+      line.uom ?? "",
+      line.plant_code ?? invoice.plant_code ?? "",
+      line.storage_location_code ?? ""
+    );
+  }
+
+  return [...header, ...lineParts].join(QR_FIELD_DELIMITER);
+}
+
+/**
+ * @param {string} qrText
+ * @returns {{ vendorCode: string, poNumber: string, invoiceNumber: string, invoiceDate: string, department: string, lines: Array<{ poLineNo: number, materialCode: string, quantity: number, uom: string, plantCode: string, storageLocationCode: string }> }|null}
+ */
+function parseInvoiceHashQrString(qrText) {
+  const trimmed = String(qrText ?? "").trim();
+  if (!trimmed || trimmed.startsWith("{")) {
+    return null;
+  }
+
+  const parts = trimmed.split(QR_FIELD_DELIMITER);
+  const minFields = QR_HEADER_FIELD_COUNT + QR_LINE_FIELD_COUNT;
+  if (parts.length < minFields) {
+    return null;
+  }
+
+  const [vendorCode, poNumber, invoiceNumber, invoiceDate, department] = parts.slice(
+    0,
+    QR_HEADER_FIELD_COUNT
+  );
+  const remainder = parts.slice(QR_HEADER_FIELD_COUNT);
+
+  if (remainder.length % QR_LINE_FIELD_COUNT !== 0) {
+    return null;
+  }
+
+  const lines = [];
+  for (let i = 0; i < remainder.length; i += QR_LINE_FIELD_COUNT) {
+    const poLineNo = Number(remainder[i]);
+    if (!Number.isFinite(poLineNo)) {
+      return null;
+    }
+    lines.push({
+      poLineNo,
+      materialCode: remainder[i + 1] ?? "",
+      quantity: Number(remainder[i + 2]),
+      uom: remainder[i + 3] ?? "",
+      plantCode: remainder[i + 4] ?? "",
+      storageLocationCode: remainder[i + 5] ?? "",
+    });
+  }
+
+  return {
+    vendorCode,
+    poNumber,
+    invoiceNumber,
+    invoiceDate,
     department,
-    line.po_line_no ?? "",
-  ].join(QR_LINE_FIELD_DELIMITER);
+    lines,
+  };
+}
+
+/**
+ * Builds per-line QR string — same full invoice payload (corporate scanner reads any line QR).
+ * @param {object} invoice
+ * @param {object[]} lines
+ * @param {object} _line
+ * @returns {string}
+ */
+function buildLineQrString(invoice, lines, _line) {
+  return buildInvoiceHashQrString(invoice, lines);
+}
+
+/**
+ * Clears cached QR PNG / line payloads (call before regenerating).
+ * @param {number} invoiceId
+ */
+export async function clearQrCaches(invoiceId) {
+  await del(cacheKeys.qrImage(invoiceId));
+  await del(`${cacheKeys.qrImage(invoiceId)}:readable`);
+  await del(cacheKeys.qrLines(invoiceId));
+  // Legacy cache keys (pre-hash format)
+  await del(`cache:qr:png:${invoiceId}`);
+  await del(`cache:qr:png:${invoiceId}:readable`);
+  await del(`cache:qr:lines:${invoiceId}`);
 }
 
 /**
@@ -248,6 +359,8 @@ export async function generateQR(invoiceId, conn = null) {
 
   const { encrypted, qrImageBase64 } = await buildQRArtifacts(jsonPayload, readableQrText);
 
+  await clearQrCaches(invoiceId);
+
   await executeQuery(
     conn,
     `INSERT INTO qr_codes (invoice_id, qr_data_encrypted, qr_data_hash)
@@ -269,11 +382,16 @@ export async function generateQR(invoiceId, conn = null) {
          qr_generated_at = NOW(3),
          submitted_at = COALESCE(submitted_at, NOW(3))
      WHERE invoice_id = ?`,
-    [encrypted, invoiceId]
+    [readableQrText, invoiceId]
   );
+
+  const readableCacheKey = `${cacheKeys.qrImage(invoiceId)}:readable`;
+  const qrB64 = qrImageBase64.replace(/^data:image\/png;base64,/, "");
+  await set(readableCacheKey, qrB64, CACHE_TTL.qrImage);
 
   return {
     qrImageBase64,
+    qrString: readableQrText,
     systemInvoiceId: invoice.system_invoice_id,
     qrDataEncrypted: encrypted,
     qrDataHash,
@@ -285,15 +403,13 @@ export async function generateQR(invoiceId, conn = null) {
  * @param {number} invoiceId
  */
 export async function regenerateQR(invoiceId) {
-  await del(cacheKeys.qrImage(invoiceId));
-  await del(`${cacheKeys.qrImage(invoiceId)}:readable`);
-  await del(cacheKeys.qrLines(invoiceId));
+  await clearQrCaches(invoiceId);
   return generateQR(invoiceId, null);
 }
 
 /**
- * Returns one QR per material/PO line for an invoice. Each QR encodes the
- * 6-field spec string (vendor, PO, invoice no, invoice date, department, line).
+ * Returns one QR per material/PO line for an invoice. Each QR encodes the full
+ * hash-delimited invoice string (same payload on every line).
  * @param {number} invoiceId
  * @returns {Promise<{ lines: Array<{ poLineNo: number, materialCode: string, qrString: string, qrImageBase64: string }> }>}
  */
@@ -320,7 +436,7 @@ export async function getInvoiceLineQRImages(invoiceId) {
 
   const lineQrs = await Promise.all(
     lines.map(async (line) => {
-      const qrString = buildLineQrString(invoice, line);
+      const qrString = buildLineQrString(invoice, lines, line);
       const buffer = await renderQRImage(qrString);
       return {
         poLineNo: line.po_line_no,
@@ -337,7 +453,7 @@ export async function getInvoiceLineQRImages(invoiceId) {
 }
 
 /**
- * Returns QR PNG image for an invoice (readable JSON: vendor, PO, materials, qty).
+ * Returns QR PNG image for an invoice (hash-delimited barcode string).
  * @param {number} invoiceId
  */
 export async function getQRImage(invoiceId) {
@@ -369,6 +485,129 @@ export async function getQRImage(invoiceId) {
   const qrImageBase64 = `data:image/png;base64,${b64}`;
 
   return { qrImageBuffer, qrImageBase64, encrypted: null, fromCache: false };
+}
+
+/**
+ * @param {ReturnType<typeof parseInvoiceHashQrString>} parsed
+ * @param {object} auditBase
+ * @param {object} context
+ */
+async function verifyHashQr(parsed, auditBase, context) {
+  const [invoices] = await query(
+    `SELECT i.invoice_id, i.system_invoice_id, i.invoice_number, i.vendor_code,
+            i.po_number, i.invoice_date, i.status, ph.plant_code,
+            v.vendor_code_sap, p.plant_name
+     FROM invoices i
+     INNER JOIN po_headers ph ON ph.po_number = i.po_number
+     INNER JOIN vendors v ON v.vendor_code = i.vendor_code
+     LEFT JOIN plants p ON p.plant_code = ph.plant_code
+     WHERE i.po_number = ? AND i.invoice_number = ?
+       AND (v.vendor_code_sap = ? OR v.vendor_code = ? OR i.vendor_code = ?)
+     LIMIT 1`,
+    [
+      parsed.poNumber,
+      parsed.invoiceNumber,
+      parsed.vendorCode,
+      parsed.vendorCode,
+      parsed.vendorCode,
+    ]
+  );
+
+  if (!invoices.length) {
+    await writeAuditLog(null, {
+      ...auditBase,
+      entityId: parsed.invoiceNumber ?? "unknown",
+      newValues: { valid: false, reason: "invoice_not_found" },
+    });
+    return { valid: false, reason: "Invoice not found in system" };
+  }
+
+  const dbInvoice = invoices[0];
+  const expectedDate = formatInvoiceDateDDMMYYYY(dbInvoice.invoice_date);
+  if (parsed.invoiceDate && parsed.invoiceDate !== expectedDate) {
+    await writeAuditLog(null, {
+      ...auditBase,
+      entityId: dbInvoice.system_invoice_id,
+      newValues: { valid: false, reason: "date_mismatch" },
+    });
+    return { valid: false, reason: "QR invoice date does not match records" };
+  }
+
+  const [dbLines] = await query(
+    `SELECT il.po_line_no, il.material_code, il.invoice_qty, il.uom, il.plant_code,
+            il.storage_location_code, m.material_description
+     FROM invoice_lines il
+     INNER JOIN materials m ON m.material_code = il.material_code
+     WHERE il.invoice_id = ?
+     ORDER BY il.po_line_no`,
+    [dbInvoice.invoice_id]
+  );
+
+  const qrLineMap = new Map(
+    parsed.lines.map((l) => [
+      `${l.poLineNo}:${l.materialCode}`,
+      l,
+    ])
+  );
+
+  for (const line of dbLines) {
+    const qrLine = qrLineMap.get(`${line.po_line_no}:${line.material_code}`);
+    if (!qrLine || qrLine.quantity !== Number(line.invoice_qty)) {
+      await writeAuditLog(null, {
+        ...auditBase,
+        entityId: dbInvoice.system_invoice_id,
+        newValues: { valid: false, reason: "line_mismatch" },
+      });
+      return { valid: false, reason: "QR line data does not match invoice" };
+    }
+  }
+
+  const scannerId = context.apiKey
+    ? `api:${sha256Hex(context.apiKey).slice(0, 16)}`
+    : `ip:${context.ipAddress ?? "unknown"}`;
+
+  await tryQrScanDedup(hashData(parsed.vendorCode + parsed.poNumber + parsed.invoiceNumber), scannerId);
+
+  await query(
+    `UPDATE qr_codes
+     SET scanned_count = scanned_count + 1, last_scanned_at = NOW(3)
+     WHERE invoice_id = ?`,
+    [dbInvoice.invoice_id]
+  );
+
+  const invDate =
+    dbInvoice.invoice_date instanceof Date
+      ? dbInvoice.invoice_date.toISOString().slice(0, 10)
+      : String(dbInvoice.invoice_date).slice(0, 10);
+
+  await writeAuditLog(null, {
+    ...auditBase,
+    entityId: dbInvoice.system_invoice_id,
+    newValues: { valid: true, invoiceId: dbInvoice.invoice_id, format: "hash" },
+  });
+
+  return {
+    valid: true,
+    invoice: {
+      invoiceId: dbInvoice.invoice_id,
+      systemInvoiceId: dbInvoice.system_invoice_id,
+      invoiceNumber: dbInvoice.invoice_number,
+      vendorCode: dbInvoice.vendor_code,
+      poNumber: dbInvoice.po_number,
+      invoiceDate: invDate,
+      plantCode: dbInvoice.plant_code,
+      status: dbInvoice.status,
+    },
+    lines: dbLines.map((l) => ({
+      poLineNo: l.po_line_no,
+      materialCode: l.material_code,
+      materialDescription: l.material_description,
+      invoiceQty: Number(l.invoice_qty),
+      uom: l.uom,
+      plantCode: l.plant_code,
+      storageLocationCode: l.storage_location_code,
+    })),
+  };
 }
 
 /**
@@ -521,6 +760,11 @@ export async function verifyQR(encryptedPayload, context = {}) {
   }
 
   const trimmedPayload = encryptedPayload.trim();
+
+  const hashParsed = parseInvoiceHashQrString(trimmedPayload);
+  if (hashParsed) {
+    return verifyHashQr(hashParsed, auditBase, context);
+  }
 
   try {
     const readable = JSON.parse(trimmedPayload);

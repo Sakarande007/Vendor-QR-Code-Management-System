@@ -23,6 +23,7 @@ export const sapExcelRowSchema = z.object({
   uom: z.string().min(1, "UOM is required").max(10),
   storage_location_raw: z.string().max(20).optional().nullable(),
   balance_qty_from_sap: z.coerce.number().nonnegative().optional(),
+  department: z.string().max(50).optional().nullable(),
 });
 
 /**

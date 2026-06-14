@@ -105,7 +105,11 @@ export function InvoiceLineItemsEditor({
                   <td className="px-3 py-2 max-w-[200px] truncate" title={line.materialDescription}>
                     {line.materialDescription}
                   </td>
-                  <td className="px-3 py-2 tabular-nums">{line.pendingQty}</td>
+                  <td className="px-3 py-2 tabular-nums">
+                  {line.currentInvoicedQty > 0
+                    ? `${line.pendingQty} (+${line.currentInvoicedQty} on invoice)`
+                    : line.pendingQty}
+                </td>
                   <td className="px-3 py-2">
                     <div>
                       <input
