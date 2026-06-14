@@ -17,6 +17,9 @@ export const SAP_EXCEL_HEADERS = [
   "Balance PO Qty",
 ];
 
+/** Optional SAP Excel column — when absent, department defaults to MOULD on upload */
+export const SAP_EXCEL_OPTIONAL_HEADERS = ["Department"];
+
 /**
  * @param {unknown} value
  * @returns {string}
@@ -152,6 +155,10 @@ export function parseSAPExcel(buffer) {
         getCell(row, headerIndex, "Item Store Location")
       ),
       balance_qty_from_sap: getCell(row, headerIndex, "Balance PO Qty"),
+      department:
+        headerIndex.Department !== undefined
+          ? cellToString(getCell(row, headerIndex, "Department"))
+          : "",
     });
   }
 

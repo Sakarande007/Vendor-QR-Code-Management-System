@@ -15,7 +15,7 @@ import {
   determinePOStatusFromBalance,
   validatePOLineQty,
 } from "../utils/poCalculations.js";
-import { generateQR } from "./qrService.js";
+import { generateQR, clearQrCaches } from "./qrService.js";
 import {
   invalidatePoDetail,
   invalidateVendorPoCaches,
@@ -95,7 +95,8 @@ export async function validateInvoiceLines(
   poNumber,
   vendorCode,
   poPlantCode,
-  forUpdate = false
+  forUpdate = false,
+  partialExistingQtyByLine = null
 ) {
   /** @type {Array<{ field: string, message: string }>} */
   const errors = [];
@@ -197,13 +198,28 @@ export async function validateInvoiceLines(
         poLine.pending_qty ??
         calculatePendingQty(poLine.ordered_qty, poLine.received_qty)
     );
-    const qtyCheck = validatePOLineQty(line.invoiceQty, availableQty);
+    const targetQty = Number(line.invoiceQty);
+    const existingOnInvoice =
+      partialExistingQtyByLine?.get(Number(line.poLineNo)) ?? 0;
+    const qtyToDispatch =
+      partialExistingQtyByLine
+        ? Math.round((targetQty - existingOnInvoice) * 1000) / 1000
+        : targetQty;
 
-    if (!qtyCheck.valid) {
+    if (partialExistingQtyByLine && qtyToDispatch < 0) {
       errors.push({
         field: `${prefix}.invoiceQty`,
-        message: qtyCheck.message ?? "Invalid invoice quantity",
+        message: `Cannot reduce invoiced quantity below ${existingOnInvoice}`,
       });
+    } else {
+      const qtyCheck = validatePOLineQty(qtyToDispatch, availableQty);
+
+      if (!qtyCheck.valid) {
+        errors.push({
+          field: `${prefix}.invoiceQty`,
+          message: qtyCheck.message ?? "Invalid invoice quantity",
+        });
+      }
     }
 
     validatedLines.push({
@@ -287,9 +303,13 @@ export async function getInvoiceWithLines(invoiceId) {
     query(
       `SELECT il.id, il.po_line_no, il.material_code, m.material_description,
             il.plant_code, il.storage_location_code, il.invoice_qty, il.uom,
-            COALESCE(NULLIF(il.unit_price, 0), m.unit_price, 0) AS unit_price
+            COALESCE(NULLIF(il.unit_price, 0), m.unit_price, 0) AS unit_price,
+            pl.ordered_qty,
+            COALESCE(pl.balance_qty, pl.pending_qty) AS balance_qty
      FROM invoice_lines il
      INNER JOIN materials m ON m.material_code = il.material_code
+     INNER JOIN invoices i ON i.invoice_id = il.invoice_id
+     INNER JOIN po_lines pl ON pl.po_number = i.po_number AND pl.line_no = il.po_line_no
      WHERE il.invoice_id = ?
      ORDER BY il.po_line_no`,
       [invoiceId]
@@ -313,6 +333,8 @@ export async function getInvoiceWithLines(invoiceId) {
       invoiceQty: Number(l.invoice_qty),
       uom: l.uom,
       unitPrice: Number(l.unit_price),
+      orderedQty: Number(l.ordered_qty),
+      balanceQty: Number(l.balance_qty),
     })),
     qr:
       qrRows.length > 0
@@ -455,9 +477,7 @@ async function replaceInvoiceDraftLines(conn, invoiceId, validatedLines) {
  * @param {number} invoiceId
  */
 async function invalidateInvoiceQrCaches(invoiceId) {
-  await del(cacheKeys.qrImage(invoiceId));
-  await del(`${cacheKeys.qrImage(invoiceId)}:readable`);
-  await del(cacheKeys.qrLines(invoiceId));
+  await clearQrCaches(invoiceId);
 }
 
 /**
@@ -499,13 +519,25 @@ export async function appendPartialInvoiceTransaction(
       throw ApiError.badRequest("PO number does not match the existing invoice");
     }
 
+    const [existingInvoiceLines] = await conn.execute(
+      `SELECT po_line_no, invoice_qty FROM invoice_lines WHERE invoice_id = ?`,
+      [invoiceId]
+    );
+    const partialExistingQtyByLine = new Map(
+      existingInvoiceLines.map((row) => [
+        Number(row.po_line_no),
+        Number(row.invoice_qty),
+      ])
+    );
+
     const validation = await validateInvoiceLines(
       conn,
       inputLines,
       poNumber,
       vendorCode,
       null,
-      true
+      true,
+      partialExistingQtyByLine
     );
 
     if (!validation.valid) {
@@ -521,7 +553,28 @@ export async function appendPartialInvoiceTransaction(
           pl.pending_qty ??
           calculatePendingQty(pl.ordered_qty, pl.received_qty)
       );
-      const qtyCheck = validatePOLineQty(line.invoiceQty, balanceBefore);
+      const previousQty = partialExistingQtyByLine.get(line.poLineNo) ?? 0;
+      const newTotalQty = line.invoiceQty;
+      const deltaQty = Math.round((newTotalQty - previousQty) * 1000) / 1000;
+
+      if (deltaQty <= 0) {
+        if (existingInvoiceLines.some((row) => Number(row.po_line_no) === line.poLineNo)) {
+          const [existingLines] = await conn.execute(
+            `SELECT id FROM invoice_lines
+             WHERE invoice_id = ? AND po_line_no = ?`,
+            [invoiceId, line.poLineNo]
+          );
+          if (existingLines.length) {
+            await conn.execute(
+              `UPDATE invoice_lines SET unit_price = ? WHERE id = ?`,
+              [line.unitPrice ?? 0, existingLines[0].id]
+            );
+          }
+        }
+        continue;
+      }
+
+      const qtyCheck = validatePOLineQty(deltaQty, balanceBefore);
 
       if (!qtyCheck.valid) {
         throw ApiError.unprocessable(
@@ -530,14 +583,13 @@ export async function appendPartialInvoiceTransaction(
         );
       }
 
-      const invoiceQty = line.invoiceQty;
       const balanceAfter = Math.max(
         0,
-        Math.round((balanceBefore - invoiceQty) * 1000) / 1000
+        Math.round((balanceBefore - deltaQty) * 1000) / 1000
       );
       const newDispatched =
-        Math.round((Number(pl.dispatched_qty) + invoiceQty) * 1000) / 1000;
-      const newReceived = Number(pl.received_qty) + invoiceQty;
+        Math.round((Number(pl.dispatched_qty) + deltaQty) * 1000) / 1000;
+      const newReceived = Number(pl.received_qty) + deltaQty;
       const newPending = balanceAfter;
 
       const [existingLines] = await conn.execute(
@@ -547,11 +599,9 @@ export async function appendPartialInvoiceTransaction(
       );
 
       if (existingLines.length) {
-        const cumulativeQty =
-          Math.round((Number(existingLines[0].invoice_qty) + invoiceQty) * 1000) / 1000;
         await conn.execute(
-          `UPDATE invoice_lines SET invoice_qty = ? WHERE id = ?`,
-          [cumulativeQty, existingLines[0].id]
+          `UPDATE invoice_lines SET invoice_qty = ?, unit_price = ? WHERE id = ?`,
+          [newTotalQty, line.unitPrice ?? 0, existingLines[0].id]
         );
       } else {
         await conn.execute(
@@ -564,7 +614,7 @@ export async function appendPartialInvoiceTransaction(
             line.materialCode,
             line.plantCode,
             line.storageLocationCode,
-            invoiceQty,
+            newTotalQty,
             line.uom,
             line.unitPrice ?? 0,
           ]
@@ -601,7 +651,7 @@ export async function appendPartialInvoiceTransaction(
           line.materialCode,
           invoiceId,
           invoice.system_invoice_id,
-          invoiceQty,
+          deltaQty,
           balanceBefore,
           balanceAfter,
           dispatchDate,
@@ -1246,6 +1296,11 @@ export async function submitInvoiceTransaction(vendorCode, invoiceId, audit) {
         Math.round((Number(pl.dispatched_qty) + invoiceQty) * 1000) / 1000;
       const newReceived = Number(pl.received_qty) + invoiceQty;
       const newPending = balanceAfter;
+
+      await conn.execute(
+        `UPDATE invoice_lines SET unit_price = ? WHERE invoice_id = ? AND po_line_no = ?`,
+        [line.unitPrice ?? 0, invoiceId, line.poLineNo]
+      );
 
       await conn.execute(
         `UPDATE po_lines

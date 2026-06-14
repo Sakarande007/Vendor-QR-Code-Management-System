@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { parseApiError } from "../../api/errors.js";
+import * as vendorApi from "../../api/vendorApi.js";
 import { usePODetailQuery } from "../../hooks/queries/usePODetailQuery.js";
 import { usePersistInvoiceMutation } from "../../hooks/queries/useInvoiceMutations.js";
 import { useAuth } from "../../hooks/useAuth.js";
@@ -35,6 +36,8 @@ function mapPoLinesToForm(poLines, plantCode) {
     materialCode: line.materialCode,
     materialDescription: line.materialDescription,
     pendingQty: line.pendingQty,
+    maxInvoiceQty: line.pendingQty,
+    currentInvoicedQty: 0,
     selected: line.pendingQty > 0.001,
     invoiceQty: "",
     uom: line.uom,
@@ -58,6 +61,7 @@ export function CreateInvoicePage() {
   const submitting = persistMutation.isPending;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [apiError, setApiError] = useState(null);
+  const [existingAppendInvoice, setExistingAppendInvoice] = useState(null);
   const submitLockRef = useRef(false);
 
   const [selectedPo, setSelectedPo] = useState(initialPo);
@@ -98,6 +102,7 @@ export function CreateInvoicePage() {
 
   const poLoadError = poQueryError ? parseApiError(poQueryError).message : null;
   const loadedPoRef = useRef(null);
+  const existingInvoiceLimitsRef = useRef(null);
 
   useEffect(() => {
     if (!poDetails?.header || !selectedPo) return;
@@ -107,11 +112,82 @@ export function CreateInvoicePage() {
     loadedPoRef.current = selectedPo;
     reset({
       poNumber: selectedPo,
-      invoiceNumber: selectedPo,
+      invoiceNumber: "",
       invoiceDate: todayInputDate(),
       lines: mapPoLinesToForm(poDetails.lines ?? [], poDetails.header.plantCode),
     });
   }, [poDetails, selectedPo, reset]);
+
+  useEffect(() => {
+    const num = String(invoiceNumber ?? "").trim();
+    if (!num || !selectedPo) {
+      setExistingAppendInvoice(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const result = await vendorApi.getMyInvoices({ search: num, pageSize: 50 });
+        const match = (result.invoices ?? []).find(
+          (inv) =>
+            inv.invoiceNumber === num &&
+            inv.poNumber === selectedPo &&
+            ["submitted", "qr_generated", "verified"].includes(inv.status)
+        );
+        if (!cancelled) setExistingAppendInvoice(match ?? null);
+      } catch {
+        if (!cancelled) setExistingAppendInvoice(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [invoiceNumber, selectedPo]);
+
+  useEffect(() => {
+    if (!existingAppendInvoice?.invoiceId || !watchedLines?.length) {
+      existingInvoiceLimitsRef.current = null;
+      return;
+    }
+
+    if (existingInvoiceLimitsRef.current === existingAppendInvoice.invoiceId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const detail = await vendorApi.getInvoiceDetails(existingAppendInvoice.invoiceId);
+        if (cancelled) return;
+
+        const invoicedMap = new Map(
+          (detail.lines ?? []).map((line) => [line.poLineNo, Number(line.invoiceQty)])
+        );
+
+        watchedLines.forEach((line, index) => {
+          const currentInvoiced = invoicedMap.get(line.poLineNo) ?? 0;
+          const maxInvoiceQty =
+            Math.round((Number(line.pendingQty) + currentInvoiced) * 1000) / 1000;
+          setValue(`lines.${index}.currentInvoicedQty`, currentInvoiced, {
+            shouldValidate: true,
+          });
+          setValue(`lines.${index}.maxInvoiceQty`, maxInvoiceQty, { shouldValidate: true });
+        });
+
+        existingInvoiceLimitsRef.current = existingAppendInvoice.invoiceId;
+      } catch {
+        /* ignore lookup errors */
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [existingAppendInvoice, watchedLines, setValue]);
 
   const handlePoChange = (poNum) => {
     loadedPoRef.current = null;
@@ -176,7 +252,7 @@ export function CreateInvoicePage() {
           regeneratedFromRejected
             ? "Invoice regenerated and QR code updated."
             : partialAppend
-              ? "Partial invoice added and QR code updated."
+              ? "Invoice quantities updated and QR code regenerated."
               : "Invoice submitted and QR code generated.",
           "success"
         );
@@ -289,8 +365,8 @@ export function CreateInvoicePage() {
             <Input
               label="Vendor invoice number"
               required
-              placeholder="Same as PO no. for partial invoicing"
-              helperText="Reuse the same invoice number to add more partial quantities on this PO."
+              placeholder="Your tax invoice number"
+              helperText="Use a unique invoice number. Reuse the same number on this PO only to update quantities on an existing invoice."
               error={errors.invoiceNumber?.message}
               {...register("invoiceNumber")}
             />
@@ -305,6 +381,14 @@ export function CreateInvoicePage() {
             />
           </div>
 
+          {existingAppendInvoice && (
+            <Alert variant="warning" title="Existing invoice">
+              Invoice <strong>{invoiceNumber}</strong> already exists for this PO. Enter the
+              <strong> total quantity</strong> you want on each line (not an additional amount).
+              You can invoice up to the available balance plus what is already on this invoice.
+            </Alert>
+          )}
+
           {errors.lines?.message && (
             <p className="text-sm text-red-600" role="alert">
               {errors.lines.message}
@@ -312,8 +396,8 @@ export function CreateInvoicePage() {
           )}
 
           <p className="text-sm text-slate-600">
-            Select materials and enter invoice quantities. You can invoice part of a PO (partial
-            qty) and combine multiple lines on one invoice — the same as admin generate invoice.
+            Select materials and enter the total invoice quantity per line. Partial quantities are
+            allowed up to the available PO balance.
           </p>
 
           <InvoiceLineItemsEditor

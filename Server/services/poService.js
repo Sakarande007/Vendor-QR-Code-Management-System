@@ -16,6 +16,7 @@ import {
   sqlInlineLimit,
 } from "../utils/pagination.js";
 import { calculatePendingQty, determinePOStatus } from "../utils/poCalculations.js";
+import { DEFAULT_PO_DEPARTMENT } from "../utils/ensureMasterSchema.js";
 import {
   getMaterialUnitPriceMap,
   resolveInvoiceUnitPrice,
@@ -448,12 +449,13 @@ export async function syncPurchaseOrders(purchaseOrders, audit) {
 
       await conn.execute(
         `INSERT INTO po_headers
-          (po_number, vendor_code, po_date, plant_code, status, total_value, currency, synced_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NOW(3))
+          (po_number, vendor_code, po_date, plant_code, department, status, total_value, currency, synced_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(3))
          ON DUPLICATE KEY UPDATE
            vendor_code = VALUES(vendor_code),
            po_date = VALUES(po_date),
            plant_code = VALUES(plant_code),
+           department = COALESCE(VALUES(department), department),
            status = VALUES(status),
            total_value = VALUES(total_value),
            currency = VALUES(currency),
@@ -464,6 +466,7 @@ export async function syncPurchaseOrders(purchaseOrders, audit) {
           po.vendorCode,
           formatDate(po.poDate),
           po.plantCode,
+          po.department?.trim() ? po.department.trim().toUpperCase() : DEFAULT_PO_DEPARTMENT,
           derivedStatus,
           po.totalValue ?? 0,
           po.currency ?? "INR",

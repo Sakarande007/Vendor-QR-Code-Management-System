@@ -1,13 +1,16 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { parseApiError } from "../../api/errors.js";
 import { ApiErrorState } from "../../components/vendor/ApiErrorState.jsx";
 import { POStatusBadge } from "../../components/vendor/POStatusBadge.jsx";
+import { POExcelUploadModal } from "../../components/admin/POExcelUploadModal.jsx";
 import { Button } from "../../components/ui/Button.jsx";
 import { Input } from "../../components/ui/Input.jsx";
 import { VirtualTable } from "../../components/ui/VirtualTable.jsx";
 import { useDebounce } from "../../hooks/useDebounce.js";
+import { useUploadVendorPOExcelMutation } from "../../hooks/queries/useVendorPOMutations.js";
 import { useVendorPOsInfinite } from "../../hooks/queries/useVendorPOsInfinite.js";
+import { useApp } from "../../hooks/useApp.js";
 import { formatDate } from "../../lib/format.js";
 
 const STATUS_OPTIONS = [
@@ -24,7 +27,10 @@ export function POListPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFilter = searchParams.get("status") || "";
   const [search, setSearch] = useState("");
+  const [uploadOpen, setUploadOpen] = useState(false);
   const debouncedSearch = useDebounce(search, 300);
+  const { showToast } = useApp();
+  const uploadMutation = useUploadVendorPOExcelMutation();
 
   const filters = useMemo(
     () => ({ status: statusFilter, search: debouncedSearch }),
@@ -49,6 +55,15 @@ export function POListPage() {
     setSearchParams(next);
   };
 
+  const handleUpload = useCallback(
+    async (file, onProgress) => {
+      const data = await uploadMutation.mutateAsync({ file, onProgress });
+      showToast("SAP Excel upload completed", "success");
+      return data;
+    },
+    [uploadMutation, showToast]
+  );
+
   if (isError && purchaseOrders.length === 0) {
     return (
       <ApiErrorState
@@ -68,6 +83,16 @@ export function POListPage() {
 
   return (
     <div className="space-y-6">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-sm text-slate-600">
+          Upload SAP BAR-code Excel to import your purchase orders. Vendor code in the file must
+          match your account.
+        </p>
+        <Button type="button" onClick={() => setUploadOpen(true)}>
+          Upload PO Excel
+        </Button>
+      </div>
+
       <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
         <div className="w-full sm:max-w-xs">
           <Input
@@ -161,6 +186,13 @@ export function POListPage() {
           </div>
         </>
       )}
+
+      <POExcelUploadModal
+        open={uploadOpen}
+        onClose={() => setUploadOpen(false)}
+        onUpload={handleUpload}
+        variant="vendor"
+      />
     </div>
   );
 }

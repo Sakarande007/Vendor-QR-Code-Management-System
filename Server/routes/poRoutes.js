@@ -1,11 +1,17 @@
 import { Router } from "express";
 import multer from "multer";
 import * as poController from "../controllers/poController.js";
+import * as poUploadController from "../controllers/poUploadController.js";
 import { authenticate } from "../middleware/authMiddleware.js";
 import { forcePasswordChangeMiddleware } from "../middleware/forcePasswordChangeMiddleware.js";
+import { sapExcelUploadHandler } from "../middleware/sapExcelUploadMiddleware.js";
 import { adminOnly, vendorOnly } from "../middleware/roleMiddleware.js";
 import { validate } from "../middleware/validationMiddleware.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import {
+  poUploadBatchIdParamSchema,
+  poUploadHistoryQuerySchema,
+} from "../validators/poUploadValidators.js";
 import {
   adminPOListQuerySchema,
   poNumberParamSchema,
@@ -41,6 +47,27 @@ router.get(
   vendorOnly,
   validate({ query: vendorPOListQuerySchema }),
   asyncHandler(poController.getMyPOs)
+);
+
+router.post(
+  "/mine/upload-excel",
+  vendorOnly,
+  sapExcelUploadHandler,
+  asyncHandler(poUploadController.uploadSAPExcelAsVendor)
+);
+
+router.get(
+  "/mine/upload-history",
+  vendorOnly,
+  validate({ query: poUploadHistoryQuerySchema }),
+  asyncHandler(poUploadController.getMyUploadHistory)
+);
+
+router.get(
+  "/mine/upload-history/:batchId",
+  vendorOnly,
+  validate({ params: poUploadBatchIdParamSchema }),
+  asyncHandler(poUploadController.getMyUploadBatchDetails)
 );
 
 router.get(

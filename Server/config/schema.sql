@@ -215,6 +215,7 @@ CREATE TABLE po_headers (
   vendor_code   VARCHAR(20)   NOT NULL,
   po_date       DATE          NOT NULL,
   plant_code    VARCHAR(10)   NOT NULL,
+  department    VARCHAR(50)   NOT NULL DEFAULT 'MOULD' COMMENT 'GRN / QR department e.g. MOULD',
   status        ENUM('open', 'partially_invoiced', 'closed', 'cancelled') NOT NULL DEFAULT 'open',
   total_value   DECIMAL(15, 2) NOT NULL DEFAULT 0.00,
   currency      VARCHAR(5)    NOT NULL DEFAULT 'INR',

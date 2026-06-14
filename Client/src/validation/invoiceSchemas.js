@@ -16,6 +16,8 @@ export const invoiceLineFormSchema = z.object({
   materialCode: z.string(),
   materialDescription: z.string().optional(),
   pendingQty: z.number(),
+  maxInvoiceQty: z.number().optional(),
+  currentInvoicedQty: z.number().optional(),
   invoiceQty: z.union([z.string(), z.number()]),
   uom: z.string().min(1).max(10),
   storageLocationCode: z.string().max(20).nullable().optional(),
@@ -30,7 +32,8 @@ export const invoiceLineFormSchema = z.object({
  */
 export function validateInvoiceLineQty(line) {
   const pending = roundQty(line.pendingQty);
-  if (line.isDisabled || pending <= QTY_EPSILON) {
+  const maxQty = roundQty(line.maxInvoiceQty ?? pending);
+  if (line.isDisabled || maxQty <= QTY_EPSILON) {
     return { valid: true, message: null };
   }
 
@@ -48,10 +51,15 @@ export function validateInvoiceLineQty(line) {
     return { valid: true, message: null };
   }
 
-  if (qty > pending + QTY_EPSILON) {
+  if (qty > maxQty + QTY_EPSILON) {
+    const currentInvoiced = roundQty(line.currentInvoicedQty ?? 0);
+    const message =
+      currentInvoiced > 0
+        ? `Cannot exceed ${maxQty} (${pending} available + ${currentInvoiced} already on invoice)`
+        : `Cannot exceed available qty (${maxQty})`;
     return {
       valid: false,
-      message: `Cannot exceed available qty (${pending})`,
+      message,
     };
   }
   return { valid: true, message: null };

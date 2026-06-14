@@ -16,8 +16,8 @@ export const cacheKeys = {
   master: (type, hash) => `cache:masters:${type}:${hash}`,
   vendorPoList: (vendorCode, queryHash) => `cache:pos:list:${vendorCode}:${queryHash}`,
   poDetail: (vendorCode, poNumber) => `cache:pos:detail:v3:${vendorCode}:${poNumber}`,
-  qrImage: (invoiceId) => `cache:qr:png:${invoiceId}`,
-  qrLines: (invoiceId) => `cache:qr:lines:${invoiceId}`,
+  qrImage: (invoiceId) => `cache:qr:png:v2:${invoiceId}`,
+  qrLines: (invoiceId) => `cache:qr:lines:v2:${invoiceId}`,
   invoiceSubmitStatus: (invoiceId) => `cache:invoice:submit:${invoiceId}`,
 };
 

@@ -31,6 +31,26 @@ export async function getMyPOs(params = {}) {
 }
 
 /**
+ * @param {File} file
+ * @param {(progress: number) => void} [onProgress]
+ */
+export async function uploadPOExcel(file, onProgress) {
+  const formData = new FormData();
+  formData.append("po_file", file);
+
+  const response = await apiClient.post("/api/pos/mine/upload-excel", formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+    onUploadProgress: (event) => {
+      if (onProgress && event.total) {
+        onProgress(Math.round((event.loaded * 100) / event.total));
+      }
+    },
+  });
+
+  return unwrapResponse(response);
+}
+
+/**
  * @param {string} poNumber
  */
 export async function getPODetails(poNumber) {

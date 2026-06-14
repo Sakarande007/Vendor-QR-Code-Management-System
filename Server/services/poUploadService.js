@@ -11,6 +11,16 @@ import {
 import { parseSAPExcel, sapDateRawToMysqlDate } from "../utils/sapExcelParser.js";
 import { validateExcelRow } from "../validators/poUploadValidators.js";
 import { invalidateVendorPoCaches } from "./cacheService.js";
+import { DEFAULT_PO_DEPARTMENT } from "../utils/ensureMasterSchema.js";
+
+/**
+ * @param {string|null|undefined} value
+ * @returns {string}
+ */
+function normalizeDepartment(value) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed ? trimmed.toUpperCase() : DEFAULT_PO_DEPARTMENT;
+}
 
 /**
  * @param {import('mysql2/promise').PoolConnection} conn
@@ -114,6 +124,28 @@ async function provisionVendorFromSapCode(sapCode, actorUserId) {
 }
 
 /**
+ * @param {string} vendorCode
+ * @returns {Promise<Set<string>>}
+ */
+async function getVendorExcelCodeSet(vendorCode) {
+  const [rows] = await query(
+    `SELECT vendor_code, vendor_code_sap FROM vendors WHERE vendor_code = ? LIMIT 1`,
+    [vendorCode]
+  );
+
+  if (!rows.length) {
+    throw ApiError.notFound("Vendor not found");
+  }
+
+  const codes = new Set([String(rows[0].vendor_code)]);
+  const sap = rows[0].vendor_code_sap;
+  if (sap) {
+    codes.add(String(sap));
+  }
+  return codes;
+}
+
+/**
  * Resolves SAP vendor codes to onboarded vendors only (admin must create vendor first).
  * @param {string[]} excelVendorCodes
  */
@@ -167,8 +199,16 @@ async function recalculatePOHeaderStatus(conn, poNumber) {
  * @param {string} batchId
  * @param {Set<string>} headersProcessed
  * @param {Set<string>} posCreated
+ * @param {string|null} [lockVendorCode]
  */
-async function upsertPOHeader(conn, row, batchId, headersProcessed, posCreated) {
+async function upsertPOHeader(
+  conn,
+  row,
+  batchId,
+  headersProcessed,
+  posCreated,
+  lockVendorCode = null
+) {
   if (headersProcessed.has(row.po_number)) {
     return;
   }
@@ -179,32 +219,62 @@ async function upsertPOHeader(conn, row, batchId, headersProcessed, posCreated) 
   const poDate = sapDateRawToMysqlDate(row.po_date_raw);
 
   const [headerExists] = await conn.execute(
-    `SELECT po_number FROM po_headers WHERE po_number = ? LIMIT 1`,
+    `SELECT po_number, vendor_code FROM po_headers WHERE po_number = ? LIMIT 1`,
     [row.po_number]
   );
 
   const headerIsNew = headerExists.length === 0;
 
-  await conn.execute(
-    `INSERT INTO po_headers
-      (po_number, vendor_code, po_date, po_date_raw, plant_code, status, source, upload_batch_id)
-     VALUES (?, ?, ?, ?, ?, 'open', 'excel_upload', ?)
-     ON DUPLICATE KEY UPDATE
-       po_date = VALUES(po_date),
-       po_date_raw = VALUES(po_date_raw),
-       plant_code = VALUES(plant_code),
-       vendor_code = VALUES(vendor_code),
-       upload_batch_id = VALUES(upload_batch_id),
-       updated_at = CURRENT_TIMESTAMP(3)`,
-    [
-      row.po_number,
-      row.vendor_code,
-      poDate,
-      row.po_date_raw,
-      row.plant_code,
-      batchId,
-    ]
-  );
+  if (!headerIsNew && lockVendorCode) {
+    if (headerExists[0].vendor_code !== lockVendorCode) {
+      throw ApiError.forbidden(
+        `PO ${row.po_number} belongs to another vendor and cannot be updated`
+      );
+    }
+
+    await conn.execute(
+      `UPDATE po_headers SET
+         po_date = ?,
+         po_date_raw = ?,
+         plant_code = ?,
+         department = ?,
+         upload_batch_id = ?,
+         updated_at = CURRENT_TIMESTAMP(3)
+       WHERE po_number = ? AND vendor_code = ?`,
+      [
+        poDate,
+        row.po_date_raw,
+        row.plant_code,
+        normalizeDepartment(row.department),
+        batchId,
+        row.po_number,
+        lockVendorCode,
+      ]
+    );
+  } else {
+    await conn.execute(
+      `INSERT INTO po_headers
+        (po_number, vendor_code, po_date, po_date_raw, plant_code, department, status, source, upload_batch_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'open', 'excel_upload', ?)
+       ON DUPLICATE KEY UPDATE
+         po_date = VALUES(po_date),
+         po_date_raw = VALUES(po_date_raw),
+         plant_code = VALUES(plant_code),
+         department = VALUES(department),
+         vendor_code = VALUES(vendor_code),
+         upload_batch_id = VALUES(upload_batch_id),
+         updated_at = CURRENT_TIMESTAMP(3)`,
+      [
+        row.po_number,
+        row.vendor_code,
+        poDate,
+        row.po_date_raw,
+        row.plant_code,
+        normalizeDepartment(row.department),
+        batchId,
+      ]
+    );
+  }
 
   if (headerIsNew) {
     posCreated.add(row.po_number);
@@ -247,7 +317,9 @@ async function upsertPOLine(conn, row, counters) {
   const orderedQty = Number(row.ordered_qty);
 
   if (!existingLine.length) {
-    const balanceQty = orderedQty;
+    const sapBalance = Number(row.balance_qty_from_sap);
+    const balanceQty =
+      Number.isFinite(sapBalance) && sapBalance >= 0 ? sapBalance : orderedQty;
 
     await conn.execute(
       `INSERT INTO po_lines
@@ -317,14 +389,20 @@ async function upsertPOLine(conn, row, counters) {
  * @param {Buffer} buffer
  * @param {{ originalname: string, mimetype: string }} fileMeta
  * @param {{ actorUserId: number, ipAddress?: string|null, userAgent?: string|null }} audit
+ * @param {{ restrictToVendorCode?: string }} [options]
  */
-export async function processSAPExcelUpload(buffer, fileMeta, audit) {
+export async function processSAPExcelUpload(buffer, fileMeta, audit, options = {}) {
+  const { restrictToVendorCode = null } = options;
   const batchId = crypto.randomUUID();
   const { sheetName, rows: rawRows, totalDataRows } = parseSAPExcel(buffer);
 
   /** @type {Array<{ row: number, field: string, message: string }>} */
   const errors = [];
   const validRows = [];
+
+  const allowedExcelCodes = restrictToVendorCode
+    ? await getVendorExcelCodeSet(restrictToVendorCode)
+    : null;
 
   for (const raw of rawRows) {
     const { valid, data, errors: rowErrors } = validateExcelRow(
@@ -335,30 +413,50 @@ export async function processSAPExcelUpload(buffer, fileMeta, audit) {
       errors.push(...rowErrors);
       continue;
     }
+
+    if (allowedExcelCodes && !allowedExcelCodes.has(data.vendor_code)) {
+      errors.push({
+        row: raw.rowNumber,
+        field: "vendor_code",
+        message: `Vendor code "${data.vendor_code}" does not match your account (${[...allowedExcelCodes].join(" / ")})`,
+      });
+      continue;
+    }
+
     validRows.push(data);
   }
 
-  const uniqueVendorCodes = [
-    ...new Set(validRows.map((r) => r.vendor_code)),
-  ];
-  const { map: vendorCodeMap, missing: vendorsNotOnboarded } =
-    await resolveOnboardedVendorCodes(uniqueVendorCodes);
+  let rowsToProcess = [];
+  let vendorsNotOnboarded = [];
 
-  for (const code of vendorsNotOnboarded) {
-    errors.push({
-      row: 0,
-      field: "vendor_code",
-      message: `Vendor ${code} is not onboarded — create vendor in Admin → Vendors first, then re-upload`,
-    });
-  }
-
-  const rowsToProcess = validRows
-    .filter((r) => vendorCodeMap.has(r.vendor_code))
-    .map((r) => ({
+  if (restrictToVendorCode) {
+    rowsToProcess = validRows.map((r) => ({
       ...r,
       excel_vendor_code: r.vendor_code,
-      vendor_code: vendorCodeMap.get(r.vendor_code),
+      vendor_code: restrictToVendorCode,
     }));
+  } else {
+    const uniqueVendorCodes = [...new Set(validRows.map((r) => r.vendor_code))];
+    const { map: vendorCodeMap, missing: missingVendors } =
+      await resolveOnboardedVendorCodes(uniqueVendorCodes);
+    vendorsNotOnboarded = missingVendors;
+
+    for (const code of vendorsNotOnboarded) {
+      errors.push({
+        row: 0,
+        field: "vendor_code",
+        message: `Vendor ${code} is not onboarded — create vendor in Admin → Vendors first, then re-upload`,
+      });
+    }
+
+    rowsToProcess = validRows
+      .filter((r) => vendorCodeMap.has(r.vendor_code))
+      .map((r) => ({
+        ...r,
+        excel_vendor_code: r.vendor_code,
+        vendor_code: vendorCodeMap.get(r.vendor_code),
+      }));
+  }
 
   /** @type {Set<string>} */
   const vendorsProcessed = new Set();
@@ -385,7 +483,14 @@ export async function processSAPExcelUpload(buffer, fileMeta, audit) {
       await conn.beginTransaction();
 
       for (const row of vendorRows) {
-        await upsertPOHeader(conn, row, batchId, headersProcessed, posCreated);
+        await upsertPOHeader(
+          conn,
+          row,
+          batchId,
+          headersProcessed,
+          posCreated,
+          restrictToVendorCode
+        );
         await upsertPOLine(conn, row, counters);
       }
 
@@ -432,7 +537,7 @@ export async function processSAPExcelUpload(buffer, fileMeta, audit) {
 
   await writeAuditLog(null, {
     actorUserId: audit.actorUserId,
-    action: "PO_SAP_EXCEL_UPLOAD",
+    action: restrictToVendorCode ? "PO_SAP_EXCEL_UPLOAD_VENDOR" : "PO_SAP_EXCEL_UPLOAD",
     entityType: "po_upload_batch",
     entityId: batchId,
     oldValues: null,
@@ -450,6 +555,10 @@ export async function processSAPExcelUpload(buffer, fileMeta, audit) {
   await Promise.all(
     [...vendorsProcessed].map((vc) => invalidateVendorPoCaches(vc))
   );
+
+  if (restrictToVendorCode) {
+    await invalidateVendorPoCaches(restrictToVendorCode);
+  }
 
   return {
     batchId,
@@ -475,20 +584,26 @@ export async function listUploadHistory(queryParams) {
     cursor: queryParams.cursor,
   });
 
-  let keysetClause = "";
-  const keysetParams = [];
+  const whereClauses = [];
+  const whereParams = [];
 
-  if (cursor?.createdAt) {
-    keysetClause =
-      "b.uploaded_at < ? OR (b.uploaded_at = ? AND b.batch_id < ?)";
-    keysetParams.push(cursor.createdAt, cursor.createdAt, cursor.id);
-  } else if (cursor?.id) {
-    keysetClause = "b.batch_id < ?";
-    keysetParams.push(cursor.id);
+  if (queryParams.uploadedBy) {
+    whereClauses.push("b.uploaded_by = ?");
+    whereParams.push(queryParams.uploadedBy);
   }
 
-  const whereSql = keysetClause ? `WHERE ${keysetClause}` : "";
-  const params = [...keysetParams];
+  if (cursor?.createdAt) {
+    whereClauses.push(
+      "(b.uploaded_at < ? OR (b.uploaded_at = ? AND b.batch_id < ?))"
+    );
+    whereParams.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  } else if (cursor?.id) {
+    whereClauses.push("b.batch_id < ?");
+    whereParams.push(cursor.id);
+  }
+
+  const whereSql = whereClauses.length ? `WHERE ${whereClauses.join(" AND ")}` : "";
+  const params = [...whereParams];
 
   const [countRows] = await query(
     `SELECT COUNT(*) AS total FROM po_upload_batches b ${whereSql}`,
@@ -536,8 +651,9 @@ export async function listUploadHistory(queryParams) {
 
 /**
  * @param {string} batchId
+ * @param {number|null} [uploadedByUserId]
  */
-export async function getUploadBatchById(batchId) {
+export async function getUploadBatchById(batchId, uploadedByUserId = null) {
   const [rows] = await query(
     `SELECT b.batch_id, b.uploaded_by, b.file_name, b.sheet_name, b.total_rows,
             b.inserted_rows, b.updated_rows, b.error_rows, b.errors, b.status,
@@ -551,6 +667,13 @@ export async function getUploadBatchById(batchId) {
 
   if (!rows.length) {
     throw ApiError.notFound("Upload batch not found");
+  }
+
+  if (
+    uploadedByUserId !== null &&
+    Number(rows[0].uploaded_by) !== Number(uploadedByUserId)
+  ) {
+    throw ApiError.forbidden("You do not have access to this upload batch");
   }
 
   const row = rows[0];

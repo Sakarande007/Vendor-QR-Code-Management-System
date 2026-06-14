@@ -139,16 +139,6 @@
   text-align: right;
 }
 
-.invoice-print-doc-title-qr {
-  text-align: center;
-  font-size: 7pt;
-}
-
-.invoice-print-doc-title-qr img {
-  display: block;
-  margin: 0 auto 2px;
-}
-
 /* Parties — From / Billing */
 .invoice-print-parties-po {
   display: grid;
@@ -271,10 +261,6 @@
   width: 32px;
 }
 
-.invoice-print-table .col-qr {
-  width: 60px;
-}
-
 .invoice-print-total-label {
   font-weight: 700;
   font-size: 9pt;
@@ -283,19 +269,6 @@
 .invoice-print-total-value {
   font-weight: 700;
   font-size: 9pt;
-}
-
-.invoice-print-table .invoice-print-line-qr {
-  text-align: center;
-  vertical-align: middle;
-  padding: 2px;
-}
-
-.invoice-print-table .invoice-print-line-qr img {
-  width: 52px;
-  height: 52px;
-  display: block;
-  margin: 0 auto;
 }
 
 /* Terms */
@@ -363,6 +336,30 @@
   text-align: center;
   font-size: 8pt;
   min-height: 48px;
+}
+
+.invoice-print-footer-qr {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  margin: 16px 0 12px;
+  padding: 12px;
+  border: 1px solid #000;
+  page-break-inside: avoid;
+}
+
+.invoice-print-footer-qr img {
+  width: 180px;
+  height: 180px;
+  display: block;
+}
+
+.invoice-print-footer-qr p {
+  margin: 8px 0 0;
+  font-size: 8pt;
+  font-weight: 700;
+  text-align: center;
 }
 
 .invoice-print-generated-note {
@@ -433,14 +430,9 @@
     print-color-adjust: exact;
   }
 
-  .invoice-print-table .invoice-print-line-qr img {
-    width: 48px;
-    height: 48px;
-  }
-
-  .invoice-print-doc-title-qr img {
-    max-width: 64px;
-    max-height: 64px;
+  .invoice-print-footer-qr img {
+    width: 160px;
+    height: 160px;
   }
 }
 

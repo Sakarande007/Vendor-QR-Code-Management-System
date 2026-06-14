@@ -94,36 +94,20 @@ async function fetchPrintPayload(invoiceId, { isAdmin = false } = {}) {
         : null);
 
   let qrBase64 = null;
-  let lineQrByPoLine = new Map();
   const canShowQr =
     invoice.status === "qr_generated" ||
     invoice.status === "verified" ||
     invoice.qrGenerated;
 
   if (canShowQr) {
-    const [invoiceQrResult, lineQrResult] = await Promise.allSettled([
-      qrApi.getQRImage(id).then(blobToBase64),
-      qrApi.getInvoiceLineQRs(id),
-    ]);
-
-    if (invoiceQrResult.status === "fulfilled") {
-      qrBase64 = invoiceQrResult.value;
-    }
-
-    if (lineQrResult.status === "fulfilled") {
-      lineQrByPoLine = new Map(
-        (lineQrResult.value?.lines ?? []).map((l) => [
-          Number(l.poLineNo),
-          l.qrImageBase64,
-        ])
-      );
+    try {
+      qrBase64 = await qrApi.getQRImage(id).then(blobToBase64);
+    } catch {
+      qrBase64 = null;
     }
   }
 
-  const lines = mergePrintLines(invoiceData.lines, poData?.lines).map((line, index) => ({
-    ...line,
-    qrBase64: lineQrByPoLine.get(Number(invoiceData.lines?.[index]?.poLineNo)) ?? null,
-  }));
+  const lines = mergePrintLines(invoiceData.lines, poData?.lines);
   const subtotal = lines.reduce((sum, row) => sum + row.lineTotal, 0);
   const storageLocations = [
     ...new Set(lines.map((l) => l.storageLocationCode).filter(Boolean)),
