@@ -1,11 +1,11 @@
 # Production deployment (VPS + Docker)
 
-Deploy the Vendor QR Invoice system for **pinwardbarcode.in**:
+Deploy the Vendor QR Invoice system for **erpdigitalbarcode.in** (see also `deploy/DOMAIN-erpdigitalbarcode.in.md` for GoDaddy DNS steps):
 
 | URL | Service |
 |-----|---------|
-| `https://www.pinwardbarcode.in` | React SPA (nginx) |
-| `https://api.pinwardbarcode.in` | Express API |
+| `https://www.erpdigitalbarcode.in` | React SPA (nginx) |
+| `https://api.erpdigitalbarcode.in` | Express API |
 
 Stack: **MySQL 8**, **Redis 7**, **API**, **static web**, **nginx gateway** (virtual hosts).
 
@@ -26,9 +26,9 @@ Create **A records** pointing to your VPS IP:
 
 | Host | Points to |
 |------|-----------|
-| `pinwardbarcode.in` | VPS IP |
-| `www.pinwardbarcode.in` | VPS IP |
-| `api.pinwardbarcode.in` | VPS IP |
+| `erpdigitalbarcode.in` | VPS IP |
+| `www.erpdigitalbarcode.in` | VPS IP |
+| `api.erpdigitalbarcode.in` | VPS IP |
 
 `pinwardbarcode.in` can redirect to `www` via Caddy (see `deploy/caddy/Caddyfile.example`).
 
