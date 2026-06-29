@@ -1,18 +1,18 @@
-# Caddy — automatic HTTPS for pinwardbarcode.in
+# Caddy — automatic HTTPS for erpdigitalbarcode.in
 # Install Caddy on the VPS host, then:
 #   sudo cp deploy/caddy/Caddyfile.example /etc/caddy/Caddyfile
 #   sudo systemctl reload caddy
 #
 # Set HTTP_PORT=8080 in .env so the Docker gateway binds :8080 (Caddy uses :80/:443).
 
-pinwardbarcode.in {
-  redir https://www.pinwardbarcode.in{uri} permanent
+erpdigitalbarcode.in {
+  redir https://www.erpdigitalbarcode.in{uri} permanent
 }
 
-www.pinwardbarcode.in {
+www.erpdigitalbarcode.in {
   reverse_proxy 127.0.0.1:8080
 }
 
-api.pinwardbarcode.in {
+api.erpdigitalbarcode.in {
   reverse_proxy 127.0.0.1:8080
 }
