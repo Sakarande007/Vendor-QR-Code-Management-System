@@ -137,7 +137,7 @@ flowchart LR
 ### Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Vendor-QR-Code-Management-System.git
+git clone https://github.com/Sakarande007/Vendor-QR-Code-Management-System.git
 cd Vendor-QR-Code-Management-System
 ```
 
@@ -238,7 +238,7 @@ See [DEPLOY.md](DEPLOY.md) and [deploy/DOMAIN-erpdigitalbarcode.in.md](deploy/DO
 
 ## License
 
-Copyright © 2026 Paranjape Autocast Pvt. Ltd.
+Copyright © 2026 Sanket Karande.
 
 This repository is **public for portfolio and reference**. Source code is provided as-is. Commercial use, redistribution, or deployment without permission from the copyright holder is not permitted unless a separate license is granted.
 
